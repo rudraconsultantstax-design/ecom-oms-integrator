@@ -58,6 +58,18 @@ api_version = "2026-04"
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/orders_create"
+  topics = [ "orders/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/orders_updated"
+  topics = [ "orders/updated" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/products_update"
+  topics = [ "products/update" ]
+
 [app_preferences]
 url = "https://ecom-oms.baisajaipur.in/preferences"
 

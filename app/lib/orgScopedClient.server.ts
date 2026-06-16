@@ -39,8 +39,16 @@ export type OrgScopedTable =
 
 export type OrgId = string;
 
-/** Loosely-typed row until generated Supabase types are wired in (see above). */
+/**
+ * Loosely-typed row until generated Supabase types are wired in (see above).
+ *
+ * Writes accept any object shape (`OrgScopedWritableRow`) so callers can pass
+ * strongly-typed mapper output (e.g. the `OrderRow`/`ProductRow` interfaces in
+ * `shopifySync.server.ts`) without each interface needing an explicit index
+ * signature. The `org_id` key is stamped/managed by the helper.
+ */
 export type OrgScopedRow = Record<string, unknown>;
+export type OrgScopedWritableRow = Record<string, unknown> | object;
 
 /**
  * Returns a thin query builder bound to a single organisation. All operations
@@ -65,7 +73,10 @@ export function orgScoped(orgId: OrgId) {
     },
 
     /** INSERT with `org_id` stamped onto every row; returns the inserted rows. */
-    insert(table: OrgScopedTable, rows: OrgScopedRow | OrgScopedRow[]) {
+    insert(
+      table: OrgScopedTable,
+      rows: OrgScopedWritableRow | OrgScopedWritableRow[],
+    ) {
       const stamped = Array.isArray(rows)
         ? rows.map((row) => ({ ...row, org_id: orgId }))
         : { ...rows, org_id: orgId };
@@ -73,11 +84,41 @@ export function orgScoped(orgId: OrgId) {
     },
 
     /**
+     * Idempotent UPSERT with `org_id` stamped onto every row. Use for
+     * webhook-driven sync where the same Shopify resource can arrive more than
+     * once (Shopify delivers at-least-once) — re-delivery updates the existing
+     * row instead of erroring or duplicating.
+     *
+     * `onConflict` must be a unique constraint that INCLUDES the scoping
+     * (e.g. `"channel_id,external_id"` for orders, `"org_id,sku"` for products)
+     * so the conflict target is tenant-safe.
+     *
+     * @example
+     *   await db.upsert("orders", row, "channel_id,external_id");
+     */
+    upsert(
+      table: OrgScopedTable,
+      rows: OrgScopedWritableRow | OrgScopedWritableRow[],
+      onConflict: string,
+    ) {
+      const stamped = Array.isArray(rows)
+        ? rows.map((row) => ({ ...row, org_id: orgId }))
+        : { ...rows, org_id: orgId };
+      return supabase
+        .from(table)
+        .upsert(stamped, { onConflict })
+        .select();
+    },
+
+    /**
      * UPDATE scoped to this org. Any `org_id` in `values` is stripped so a row
      * can never be moved to another tenant.
      */
     update(table: OrgScopedTable, values: OrgScopedRow) {
-      const { org_id: _ignored, ...safeValues } = values;
+      // Strip any caller-supplied `org_id` so a row can never be reassigned to
+      // another tenant via update.
+      const safeValues: OrgScopedRow = { ...values };
+      delete safeValues.org_id;
       return supabase.from(table).update(safeValues).eq("org_id", orgId);
     },
 
