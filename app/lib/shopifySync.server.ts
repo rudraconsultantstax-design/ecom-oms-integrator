@@ -136,7 +136,10 @@ export async function recordSyncLog(args: {
  * (e.g. `gid://shopify/Order/123`), so we reconstruct the GID from the numeric
  * id to stay consistent with data written by the dashboard/sync jobs.
  */
-function toGid(resource: "Order" | "Product", id: unknown): string {
+function toGid(
+  resource: "Order" | "Product" | "InventoryItem" | "Location",
+  id: unknown,
+): string {
   return `gid://shopify/${resource}/${String(id)}`;
 }
 
@@ -432,5 +435,82 @@ export async function syncProductWebhook(
     eventType: topic,
     status: "ok",
     message: `Upserted ${rows.length} product variant(s).`,
+  });
+}
+
+/**
+ * Minimal shape of the fields we read off an inventory_levels/update webhook.
+ *
+ * Shopify delivers REST-shaped JSON with numeric `inventory_item_id` /
+ * `location_id` and an integer `available` quantity, e.g.
+ *   { "inventory_item_id": 808950810, "location_id": 905684977,
+ *     "available": 6, "updated_at": "2024-01-01T00:00:00-05:00" }
+ */
+interface ShopifyInventoryLevelPayload {
+  inventory_item_id?: number | string;
+  location_id?: number | string;
+  available?: number | string | null;
+  updated_at?: string;
+}
+
+/** Row shape written to `stock_levels` (org_id is stamped by orgScoped.upsert). */
+export interface StockLevelRow {
+  inventory_item_id: string;
+  location_id: string;
+  available: number | null;
+  raw: Record<string, unknown>;
+  synced_at: string;
+}
+
+/**
+ * Map an inventory_levels/update payload onto the `stock_levels` columns.
+ *
+ * `inventory_item_id` / `location_id` are reconstructed as Admin GraphQL GIDs to
+ * match the `external_id` convention used by the orders/products sync. They form
+ * the tenant-safe conflict target `(org_id, inventory_item_id, location_id)`.
+ */
+export function mapInventoryLevel(
+  payload: ShopifyInventoryLevelPayload,
+): StockLevelRow {
+  const available =
+    payload.available === null || payload.available === undefined
+      ? null
+      : Number(payload.available);
+
+  return {
+    inventory_item_id: toGid("InventoryItem", payload.inventory_item_id),
+    location_id: toGid("Location", payload.location_id),
+    available: available !== null && Number.isFinite(available) ? available : null,
+    raw: payload as unknown as Record<string, unknown>,
+    synced_at: str(payload.updated_at) ?? new Date().toISOString(),
+  };
+}
+
+/**
+ * End-to-end handler for an inventory_levels/update webhook: idempotently upsert
+ * the `stock_levels` row for this (org, inventory item, location), keyed on
+ * `(org_id, inventory_item_id, location_id)`. Records a best-effort `sync_logs`
+ * row. Throws on a hard failure so the caller can log-and-acknowledge.
+ */
+export async function syncInventoryLevelWebhook(
+  orgId: OrgId,
+  topic: string,
+  payload: unknown,
+): Promise<void> {
+  const db = orgScoped(orgId);
+  const row = mapInventoryLevel(payload as ShopifyInventoryLevelPayload);
+
+  const { error } = await db.upsert(
+    "stock_levels",
+    row,
+    "org_id,inventory_item_id,location_id",
+  );
+  if (error) throw new Error(error.message);
+
+  await recordSyncLog({
+    orgId,
+    eventType: topic,
+    status: "ok",
+    message: `Upserted stock level for ${row.inventory_item_id} @ ${row.location_id} (available: ${row.available ?? "n/a"}).`,
   });
 }

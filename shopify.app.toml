@@ -70,6 +70,10 @@ api_version = "2026-04"
   uri = "/webhooks/app/products_update"
   topics = [ "products/update" ]
 
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/inventory_levels_update"
+  topics = [ "inventory_levels/update" ]
+
 [app_preferences]
 url = "https://ecom-oms.baisajaipur.in/preferences"
 
