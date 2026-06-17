@@ -74,6 +74,18 @@ api_version = "2026-04"
   uri = "/webhooks/app/inventory_levels_update"
   topics = [ "inventory_levels/update" ]
 
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/customers_data_request"
+  topics = [ "customers/data_request" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/customers_redact"
+  topics = [ "customers/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/shop_redact"
+  topics = [ "shop/redact" ]
+
 [app_preferences]
 url = "https://ecom-oms.baisajaipur.in/preferences"
 
