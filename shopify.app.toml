@@ -74,17 +74,18 @@ api_version = "2026-04"
   uri = "/webhooks/app/inventory_levels_update"
   topics = [ "inventory_levels/update" ]
 
+  # Mandatory GDPR/privacy webhooks must use `compliance_topics` (not `topics`).
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/customers_data_request"
-  topics = [ "customers/data_request" ]
+  compliance_topics = [ "customers/data_request" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/customers_redact"
-  topics = [ "customers/redact" ]
+  compliance_topics = [ "customers/redact" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/shop_redact"
-  topics = [ "shop/redact" ]
+  compliance_topics = [ "shop/redact" ]
 
 [app_preferences]
 url = "https://ecom-oms.baisajaipur.in/preferences"
