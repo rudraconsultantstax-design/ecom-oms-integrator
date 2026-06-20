@@ -1,8 +1,10 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import { authenticate } from "../shopify.server";
+import { orgScoped } from "../lib/orgScopedClient.server";
+import { getOrgIdForShop } from "../lib/shopifySync.server";
 
 const RECENT_ORDERS_QUERY = `#graphql
   query RecentOrders {
@@ -46,14 +48,101 @@ interface RecentOrdersResponse {
   };
 }
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+/**
+ * KPI summary computed from the Supabase OMS backend (org-scoped, read-only).
+ * `null` means the KPIs could not be loaded (no tenant row yet, or a backend
+ * error) — the page still renders the live-from-Shopify orders below as a
+ * resilient fallback. `error` carries a short reason for the KPI band only.
+ */
+interface DashboardKpis {
+  totalOrders: number;
+  unfulfilled: number;
+  returns: number;
+  syncErrors24h: number;
+}
 
-  const response = await admin.graphql(RECENT_ORDERS_QUERY);
-  const body = (await response.json()) as RecentOrdersResponse;
+interface KpiResult {
+  kpis: DashboardKpis | null;
+  hasOrg: boolean;
+  error: string | null;
+}
+
+/** A fulfillment_status that means the order still needs fulfilling. */
+function isUnfulfilled(status: string | null): boolean {
+  if (!status) return true; // null = unfulfilled in the REST/synced convention
+  const normalized = status.toUpperCase();
+  return normalized !== "FULFILLED" && normalized !== "RESTOCKED";
+}
+
+/**
+ * Compute the dashboard KPIs from Supabase for a shop. Best-effort: returns a
+ * structured result instead of throwing so a backend hiccup degrades the KPI
+ * band gracefully without taking down the live-orders view.
+ */
+async function loadKpis(shop: string): Promise<KpiResult> {
+  const orgId = await getOrgIdForShop(shop);
+  if (!orgId) {
+    return { kpis: null, hasOrg: false, error: null };
+  }
+
+  try {
+    const db = orgScoped(orgId);
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    // Tenant-scoped, read-only reads of just the columns each KPI needs.
+    const [ordersRes, returnsRes, errorsRes] = await Promise.all([
+      db.select("orders", "id, fulfillment_status").limit(10000),
+      db.select("returns", "id").limit(10000),
+      db
+        .select("sync_logs", "id")
+        .eq("status", "error")
+        .gte("created_at", since)
+        .limit(10000),
+    ]);
+
+    if (ordersRes.error) throw new Error(ordersRes.error.message);
+    if (returnsRes.error) throw new Error(returnsRes.error.message);
+    if (errorsRes.error) throw new Error(errorsRes.error.message);
+
+    const orderRows =
+      (ordersRes.data as unknown as
+        | { fulfillment_status: string | null }[]
+        | null) ?? [];
+
+    return {
+      kpis: {
+        totalOrders: orderRows.length,
+        unfulfilled: orderRows.filter((o) => isUnfulfilled(o.fulfillment_status))
+          .length,
+        returns: (returnsRes.data ?? []).length,
+        syncErrors24h: (errorsRes.data ?? []).length,
+      },
+      hasOrg: true,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      kpis: null,
+      hasOrg: true,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { admin, session } = await authenticate.admin(request);
+
+  // Live-from-Shopify orders (existing behavior, always the fallback view) and
+  // the Supabase-backed KPI band, fetched together.
+  const [ordersResponse, kpiResult] = await Promise.all([
+    admin.graphql(RECENT_ORDERS_QUERY),
+    loadKpis(session.shop),
+  ]);
+
+  const body = (await ordersResponse.json()) as RecentOrdersResponse;
   const orders = body.data?.orders?.edges.map((edge) => edge.node) ?? [];
 
-  return { orders };
+  return { orders, ...kpiResult };
 };
 
 function formatMoney(amount: string, currencyCode: string): string {
@@ -84,11 +173,104 @@ function formatDate(iso: string): string {
   });
 }
 
-export default function OrdersDashboard() {
-  const { orders } = useLoaderData<typeof loader>();
+function KpiCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone?: "critical" | "warning";
+}) {
+  return (
+    <s-box
+      padding="base"
+      borderWidth="base"
+      borderRadius="base"
+      background="subdued"
+      minInlineSize="160px"
+    >
+      <s-stack direction="block" gap="small-100">
+        <s-text tone="neutral">{label}</s-text>
+        <s-heading>
+          {tone ? <s-text tone={tone}>{value}</s-text> : value}
+        </s-heading>
+      </s-stack>
+    </s-box>
+  );
+}
+
+function KpiBand({
+  kpis,
+  hasOrg,
+  error,
+  loading,
+}: KpiResult & { loading: boolean }) {
+  if (loading) {
+    return (
+      <s-stack direction="inline" gap="base" alignItems="center">
+        <s-spinner accessibilityLabel="Loading metrics" size="base" />
+        <s-text tone="neutral">Loading metrics…</s-text>
+      </s-stack>
+    );
+  }
+
+  if (!hasOrg) {
+    return (
+      <s-paragraph>
+        <s-text tone="neutral">
+          This store is still being set up. Key metrics will appear here once
+          provisioning completes and data syncs in.
+        </s-text>
+      </s-paragraph>
+    );
+  }
+
+  if (error || !kpis) {
+    return (
+      <s-banner tone="critical" heading="Couldn’t load metrics">
+        <s-paragraph>
+          The dashboard metrics are temporarily unavailable. Recent orders from
+          Shopify are still shown below.
+        </s-paragraph>
+      </s-banner>
+    );
+  }
 
   return (
-    <s-page heading="Orders">
+    <s-stack direction="inline" gap="base">
+      <KpiCard label="Total orders" value={kpis.totalOrders} />
+      <KpiCard
+        label="Unfulfilled"
+        value={kpis.unfulfilled}
+        tone={kpis.unfulfilled > 0 ? "warning" : undefined}
+      />
+      <KpiCard label="Returns" value={kpis.returns} />
+      <KpiCard
+        label="Sync errors (24h)"
+        value={kpis.syncErrors24h}
+        tone={kpis.syncErrors24h > 0 ? "critical" : undefined}
+      />
+    </s-stack>
+  );
+}
+
+export default function OrdersDashboard() {
+  const { orders, kpis, hasOrg, error } = useLoaderData<typeof loader>();
+  const navigation = useNavigation();
+  const loading = navigation.state === "loading";
+
+  return (
+    <s-page heading="Dashboard">
+      <s-section heading="Overview">
+        <KpiBand
+          kpis={kpis}
+          hasOrg={hasOrg}
+          error={error}
+          loading={loading}
+        />
+      </s-section>
+
       <s-section heading={`Recent orders (${orders.length})`}>
         {orders.length === 0 ? (
           <s-stack direction="block" gap="base">

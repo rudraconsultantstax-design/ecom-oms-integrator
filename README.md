@@ -75,7 +75,60 @@ This template is configured with the Shopify Dev MCP. This instructs [Cursor](ht
 
 For more information on the Shopify Dev MCP please read [the documentation](https://shopify.dev/docs/apps/build/devmcp).
 
-## Deployment
+## Deploy
+
+This app (Ecom OMS integrator) is part of a three-app suite that shares one
+Supabase backend. For the full end-to-end sequence see `docs/BUILD_RUNBOOK.md`;
+the essentials for shipping this app:
+
+### Required environment variables
+
+Set these in the host (Hostinger / Vercel project settings); never commit them.
+See `.env.example` for the annotated list.
+
+| Variable | Notes |
+| --- | --- |
+| `SHOPIFY_API_KEY` | App Client ID (Dev Dashboard → Settings → Credentials). |
+| `SHOPIFY_API_SECRET` | App secret. Server-only. |
+| `SCOPES` | Comma-separated; must match `shopify.app.toml` `[access_scopes]`. |
+| `SHOPIFY_APP_URL` | Public app URL, `https://ecom-oms.baisajaipur.in`. |
+| `SUPABASE_URL` | `https://mhlyicynbznlvbinvqna.supabase.co`. |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Server-only**, bypasses RLS — never expose to the browser. |
+| `SUPABASE_ANON_KEY` | Optional; reserved for future client-side access. |
+| `NODE_ENV` | Set to `production` when self-hosting. |
+
+`shopify app dev` injects the four `SHOPIFY_*` values automatically during local
+development, so you only need to set them explicitly for production.
+
+### Push Shopify config & register webhooks
+
+```shell
+npm run deploy   # shopify app deploy
+```
+
+This pushes `shopify.app.toml` (scopes, app URLs, the `[[webhooks.subscriptions]]`
+for `orders/create`, `orders/updated`, `products/update`, and
+`inventory_levels/update`) and auto-registers the mandatory GDPR/compliance
+webhooks (`customers/data_request`, `customers/redact`, `shop/redact`) that
+cannot be added through the dashboard UI.
+
+### Database
+
+Sessions live in Prisma/SQLite (`npm run setup` runs `prisma migrate deploy`).
+Business data lives in the shared Supabase Postgres — apply the SQL in
+`supabase/migrations/` (e.g. via the Supabase CLI or dashboard), including
+`stock_levels` for inventory sync.
+
+### Hostinger / DNS
+
+The app serves from the custom subdomain `ecom-oms.baisajaipur.in`. In Hostinger
+DNS for `baisajaipur.in`, point that subdomain at the host (the CNAME the
+platform provides), then confirm `SHOPIFY_APP_URL` and the `application_url` /
+`redirect_urls` in `shopify.app.toml` all match it. Re-run `npm run deploy` after
+any URL change so Shopify has the current callback URLs. (Sibling apps use
+`ecom.baisajaipur.in` and `webstore.baisajaipur.in`.)
+
+## Deployment (template reference)
 
 ### Application Storage
 
